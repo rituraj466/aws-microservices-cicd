@@ -2,21 +2,33 @@
 pipeline {
     agent any
 
-    parameters {
-        string(name: 'IMAGE_TAG', defaultValue: '1.0',
-               description: 'Docker image version')
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+    }
 
-        string(name: 'TARGET_HOST', defaultValue: '',
-               description: 'Application EC2 IP')
+    parameters {
+        string(
+            name: 'IMAGE_TAG',
+            defaultValue: '1.0',
+            description: 'Docker image version'
+        )
+
+        string(
+            name: 'TARGET_HOST',
+            defaultValue: '',
+            description: 'Application EC2 Public IP'
+        )
     }
 
     environment {
-        AWS_REGION     = 'ap-southeast-2'
+        AWS_REGION = 'ap-southeast-2'
         AWS_ACCOUNT_ID = '266294230860'
-        ECR_REGISTRY   = '266294230860.dkr.ecr.ap-southeast-2.amazonaws.com'
+
+        ECR_REGISTRY = '266294230860.dkr.ecr.ap-southeast-2.amazonaws.com'
 
         DEPLOY_USER = 'ubuntu'
-        DEPLOY_DIR  = '/home/ubuntu/cicd-project/aws-microservices-cicd'
+        DEPLOY_DIR = '/home/ubuntu/cicd-project/aws-microservices-cicd'
     }
 
     stages {
@@ -24,6 +36,7 @@ pipeline {
         stage('Checkout') {
             steps {
                 checkout scm
+                echo 'Source code checkout completed.'
             }
         }
 
@@ -31,12 +44,15 @@ pipeline {
             steps {
                 sh '''
                     set -e
+
                     test -f compose.yaml
                     test -f user-service/Dockerfile
-                    test -f product-service/Dockerfile
+                    test -f product-servic/Dockerfile
                     test -f order-service/Dockerfile
+
                     docker compose -f compose.yaml config -q
-                    echo "Configuration validation successful"
+
+                    echo "All configuration files validated."
                 '''
             }
         }
@@ -45,11 +61,12 @@ pipeline {
             steps {
                 sh '''
                     set -e
-                    for service in user-service product-service order-service
-                    do
-                        test -d "$service"
-                        echo "$service directory verified"
-                    done
+
+                    test -f user-service/app.py
+                    test -f product-servic/app.py
+                    test -f order-service/app.py
+
+                    echo "Application files verified."
                 '''
             }
         }
@@ -58,9 +75,20 @@ pipeline {
             steps {
                 sh '''
                     set -e
-                    docker build -t user-service:${IMAGE_TAG} ./user-service
-                    docker build -t product-service:${IMAGE_TAG} ./product-service
-                    docker build -t order-service:${IMAGE_TAG} ./order-service
+
+                    docker build \
+                      -t user-service:${IMAGE_TAG} \
+                      ./user-service
+
+                    docker build \
+                      -t product-service:${IMAGE_TAG} \
+                      ./product-servic
+
+                    docker build \
+                      -t order-service:${IMAGE_TAG} \
+                      ./order-service
+
+                    echo "All Docker images built successfully."
                 '''
             }
         }
@@ -69,8 +97,14 @@ pipeline {
             steps {
                 sh '''
                     set -e
-                    aws ecr get-login-password --region ${AWS_REGION} |
-                    docker login --username AWS --password-stdin ${ECR_REGISTRY}
+
+                    aws ecr get-login-password \
+                      --region ${AWS_REGION} |
+                    docker login \
+                      --username AWS \
+                      --password-stdin ${ECR_REGISTRY}
+
+                    echo "ECR login successful."
                 '''
             }
         }
@@ -79,9 +113,17 @@ pipeline {
             steps {
                 sh '''
                     set -e
-                    docker tag user-service:${IMAGE_TAG} ${ECR_REGISTRY}/user-service:${IMAGE_TAG}
-                    docker tag product-service:${IMAGE_TAG} ${ECR_REGISTRY}/product-service:${IMAGE_TAG}
-                    docker tag order-service:${IMAGE_TAG} ${ECR_REGISTRY}/order-service:${IMAGE_TAG}
+
+                    docker tag user-service:${IMAGE_TAG} \
+                    ${ECR_REGISTRY}/user-service:${IMAGE_TAG}
+
+                    docker tag product-service:${IMAGE_TAG} \
+                    ${ECR_REGISTRY}/product-service:${IMAGE_TAG}
+
+                    docker tag order-service:${IMAGE_TAG} \
+                    ${ECR_REGISTRY}/order-service:${IMAGE_TAG}
+
+                    echo "Images tagged successfully."
                 '''
             }
         }
@@ -90,48 +132,78 @@ pipeline {
             steps {
                 sh '''
                     set -e
+
                     docker push ${ECR_REGISTRY}/user-service:${IMAGE_TAG}
+
                     docker push ${ECR_REGISTRY}/product-service:${IMAGE_TAG}
+
                     docker push ${ECR_REGISTRY}/order-service:${IMAGE_TAG}
+
+                    echo "All images pushed to ECR."
                 '''
+            }
+        }
+
+        stage('Prepare Deployment Compose') {
+            steps {
+                script {
+                    def deployCompose = """
+services:
+  user-service:
+    image: ${env.ECR_REGISTRY}/user-service:${params.IMAGE_TAG}
+    container_name: user-service
+    ports:
+      - "8081:5000"
+    restart: unless-stopped
+
+  product-service:
+    image: ${env.ECR_REGISTRY}/product-service:${params.IMAGE_TAG}
+    container_name: product-service
+    ports:
+      - "8082:5000"
+    restart: unless-stopped
+
+  order-service:
+    image: ${env.ECR_REGISTRY}/order-service:${params.IMAGE_TAG}
+    container_name: order-service
+    ports:
+      - "8083:5000"
+    restart: unless-stopped
+"""
+                    writeFile(
+                        file: 'deploy-compose.yaml',
+                        text: deployCompose
+                    )
+                }
             }
         }
 
         stage('Deploy to Application EC2') {
             steps {
-                sshagent(credentials: ['ec2-deploy-key']) {
-                    sh '''
-                        set -e
+                script {
+                    if (!params.TARGET_HOST?.trim()) {
+                        error('Please provide Application EC2 Public IP in TARGET_HOST.')
+                    }
 
-                        test -n "${TARGET_HOST}"
+                    sshagent(credentials: ['ec2-deploy-key']) {
+                        sh '''
+                            set -e
 
-                        ssh -o BatchMode=yes ${DEPLOY_USER}@${TARGET_HOST} \
-                            "mkdir -p ${DEPLOY_DIR}"
+                            ssh -o StrictHostKeyChecking=no \
+                              ${DEPLOY_USER}@${TARGET_HOST} \
+                              "mkdir -p ${DEPLOY_DIR}"
 
-                        scp -o BatchMode=yes compose.yaml \
-                            ${DEPLOY_USER}@${TARGET_HOST}:${DEPLOY_DIR}/compose.yaml
+                            scp -o StrictHostKeyChecking=no \
+                              deploy-compose.yaml \
+                              ${DEPLOY_USER}@${TARGET_HOST}:${DEPLOY_DIR}/compose.yaml
 
-                        ssh -o BatchMode=yes ${DEPLOY_USER}@${TARGET_HOST} \
-                            "ECR_REGISTRY='${ECR_REGISTRY}' \
-                             IMAGE_TAG='${IMAGE_TAG}' \
-                             AWS_REGION='${AWS_REGION}' \
-                             DEPLOY_DIR='${DEPLOY_DIR}' bash -s" <<'REMOTE'
+                            ssh -o StrictHostKeyChecking=no \
+                              ${DEPLOY_USER}@${TARGET_HOST} \
+                              "aws ecr get-login-password --region ${AWS_REGION} | sudo docker login --username AWS --password-stdin ${ECR_REGISTRY} && cd ${DEPLOY_DIR} && sudo docker compose pull && sudo docker compose up -d --remove-orphans"
 
-                        set -e
-                        cd "$DEPLOY_DIR"
-
-                        aws ecr get-login-password --region "$AWS_REGION" |
-                        sudo docker login --username AWS --password-stdin "$ECR_REGISTRY"
-
-                        sudo -E env ECR_REGISTRY="$ECR_REGISTRY" IMAGE_TAG="$IMAGE_TAG" \
-                            docker compose pull
-
-                        sudo -E env ECR_REGISTRY="$ECR_REGISTRY" IMAGE_TAG="$IMAGE_TAG" \
-                            docker compose up -d --remove-orphans
-
-                        sudo docker compose ps
-                        REMOTE
-                    '''
+                            echo "Deployment completed."
+                        '''
+                    }
                 }
             }
         }
@@ -140,8 +212,11 @@ pipeline {
             steps {
                 sshagent(credentials: ['ec2-deploy-key']) {
                     sh '''
-                        ssh -o BatchMode=yes ${DEPLOY_USER}@${TARGET_HOST} \
-                            "cd ${DEPLOY_DIR} && sudo docker compose ps"
+                        set -e
+
+                        ssh -o StrictHostKeyChecking=no \
+                          ${DEPLOY_USER}@${TARGET_HOST} \
+                          "cd ${DEPLOY_DIR} && sudo docker compose ps"
                     '''
                 }
             }
@@ -150,13 +225,15 @@ pipeline {
 
     post {
         success {
-            echo 'All three microservices deployed successfully!'
+            echo 'SUCCESS: All microservices deployed successfully.'
         }
+
         failure {
-            echo 'Pipeline failed. Check Console Output.'
+            echo 'FAILURE: Pipeline failed. Check the Jenkins console output.'
         }
+
         always {
-            echo 'Pipeline execution completed.'
+            echo 'CI/CD Pipeline execution completed.'
         }
     }
 }
