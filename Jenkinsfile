@@ -5,13 +5,14 @@ pipeline {
     options {
         timestamps()
         disableConcurrentBuilds()
+        timeout(time: 90, unit: 'MINUTES')
     }
 
     parameters {
         string(
             name: 'IMAGE_TAG',
             defaultValue: '1.0',
-            description: 'Docker image version'
+            description: 'Docker Image Version'
         )
 
         string(
@@ -45,6 +46,8 @@ pipeline {
                 sh '''
                     set -e
 
+                    echo "Checking project files..."
+
                     test -f compose.yaml
                     test -f user-service/Dockerfile
                     test -f product-servic/Dockerfile
@@ -52,7 +55,7 @@ pipeline {
 
                     docker compose -f compose.yaml config -q
 
-                    echo "All configuration files validated."
+                    echo "All configurations validated successfully."
                 '''
             }
         }
@@ -66,29 +69,41 @@ pipeline {
                     test -f product-servic/app.py
                     test -f order-service/app.py
 
-                    echo "Application files verified."
+                    echo "Application files verified successfully."
                 '''
             }
         }
 
         stage('Docker Image Build') {
+            options {
+                timeout(time: 30, unit: 'MINUTES')
+            }
+
             steps {
                 sh '''
                     set -e
 
-                    docker build \
+                    echo "Checking Docker daemon..."
+                    docker info
+
+                    echo "Building User Service..."
+                    DOCKER_BUILDKIT=0 docker build \
                       -t user-service:${IMAGE_TAG} \
                       ./user-service
 
-                    docker build \
+                    echo "Building Product Service..."
+                    DOCKER_BUILDKIT=0 docker build \
                       -t product-service:${IMAGE_TAG} \
                       ./product-servic
 
-                    docker build \
+                    echo "Building Order Service..."
+                    DOCKER_BUILDKIT=0 docker build \
                       -t order-service:${IMAGE_TAG} \
                       ./order-service
 
                     echo "All Docker images built successfully."
+
+                    docker images
                 '''
             }
         }
@@ -97,6 +112,8 @@ pipeline {
             steps {
                 sh '''
                     set -e
+
+                    echo "Logging in to AWS ECR..."
 
                     aws ecr get-login-password \
                       --region ${AWS_REGION} |
@@ -123,7 +140,7 @@ pipeline {
                     docker tag order-service:${IMAGE_TAG} \
                     ${ECR_REGISTRY}/order-service:${IMAGE_TAG}
 
-                    echo "Images tagged successfully."
+                    echo "All images tagged successfully."
                 '''
             }
         }
@@ -133,13 +150,16 @@ pipeline {
                 sh '''
                     set -e
 
+                    echo "Pushing User Service..."
                     docker push ${ECR_REGISTRY}/user-service:${IMAGE_TAG}
 
+                    echo "Pushing Product Service..."
                     docker push ${ECR_REGISTRY}/product-service:${IMAGE_TAG}
 
+                    echo "Pushing Order Service..."
                     docker push ${ECR_REGISTRY}/order-service:${IMAGE_TAG}
 
-                    echo "All images pushed to ECR."
+                    echo "All images pushed to ECR successfully."
                 '''
             }
         }
@@ -175,6 +195,11 @@ services:
                         text: deployCompose
                     )
                 }
+
+                sh '''
+                    docker compose -f deploy-compose.yaml config -q
+                    echo "Deployment compose file generated."
+                '''
             }
         }
 
@@ -182,26 +207,32 @@ services:
             steps {
                 script {
                     if (!params.TARGET_HOST?.trim()) {
-                        error('Please provide Application EC2 Public IP in TARGET_HOST.')
+                        error('Please enter Application EC2 Public IP in TARGET_HOST.')
                     }
 
                     sshagent(credentials: ['ec2-deploy-key']) {
                         sh '''
                             set -e
 
+                            echo "Preparing application EC2..."
+
                             ssh -o StrictHostKeyChecking=no \
                               ${DEPLOY_USER}@${TARGET_HOST} \
                               "mkdir -p ${DEPLOY_DIR}"
+
+                            echo "Copying deployment compose file..."
 
                             scp -o StrictHostKeyChecking=no \
                               deploy-compose.yaml \
                               ${DEPLOY_USER}@${TARGET_HOST}:${DEPLOY_DIR}/compose.yaml
 
+                            echo "Deploying microservices..."
+
                             ssh -o StrictHostKeyChecking=no \
                               ${DEPLOY_USER}@${TARGET_HOST} \
                               "aws ecr get-login-password --region ${AWS_REGION} | sudo docker login --username AWS --password-stdin ${ECR_REGISTRY} && cd ${DEPLOY_DIR} && sudo docker compose pull && sudo docker compose up -d --remove-orphans"
 
-                            echo "Deployment completed."
+                            echo "Deployment completed successfully."
                         '''
                     }
                 }
@@ -214,9 +245,13 @@ services:
                     sh '''
                         set -e
 
+                        echo "Checking deployed containers..."
+
                         ssh -o StrictHostKeyChecking=no \
                           ${DEPLOY_USER}@${TARGET_HOST} \
                           "cd ${DEPLOY_DIR} && sudo docker compose ps"
+
+                        echo "Deployment verification completed."
                     '''
                 }
             }
@@ -229,7 +264,7 @@ services:
         }
 
         failure {
-            echo 'FAILURE: Pipeline failed. Check the Jenkins console output.'
+            echo 'FAILURE: Pipeline execution failed. Check Console Output.'
         }
 
         always {
